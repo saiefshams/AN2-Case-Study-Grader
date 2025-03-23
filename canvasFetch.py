@@ -135,7 +135,7 @@ class CanvasAPI:
 
 def main():
     # Replace 'YOUR_API_TOKEN' with your actual Canvas LMS API token 
-    API_TOKEN = 'token goes here' 
+    API_TOKEN = 'YOUR_API_TOKEN' 
     BASE_URL = 'https://learn.ontariotechu.ca/api/v1/'
     
     # Setup tkinter root window (hidden)
