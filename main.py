@@ -5,6 +5,7 @@ from tkinter import filedialog
 import csv
 import subprocess
 from ciscoconfparse import CiscoConfParse
+from ipaddress import ip_address, ip_network
 
 
 def cidr_to_decimal(cidr):
@@ -46,7 +47,6 @@ class CaseStudyGrader:
     def run(self):
         """Main execution flow."""
         self.check_submissions()
-        self.select_working_configs()
         self.initialize_csv()
         self.grade_submissions()
 
@@ -79,17 +79,6 @@ class CaseStudyGrader:
         else:
             print("[ERROR] Invalid input. Exiting.")
             exit()
-
-    def select_working_configs(self):
-        """Lets the user select the directory containing the working configuration files."""
-        print("Select the directory containing working configuration files...")
-        root = tk.Tk()
-        root.withdraw()
-        self.answer_key_dir = filedialog.askdirectory()
-        if not self.answer_key_dir:
-            print("[ERROR] No directory selected. Exiting.")
-            exit()
-        print(f"[INFO] Selected working configs directory: {self.answer_key_dir}")
 
     def initialize_csv(self):
         """Initializes the output CSV file."""
@@ -175,7 +164,8 @@ class CaseStudyGrader:
                 task_7_results["grade"],
                 task_8_results["grade"]
             ])
-            print(f"[INFO] Total grade for {group}: {total_grade}/100")
+            print(f"[GRADE] Total grade for {group}: {total_grade}/139")
+            print(f"[GRADE] Percentage grade for {group}: {total_grade / 139 * 100:.2f}%")
 
             # Ask if the user wants to continue to the next group
             if i < len(self.groups) - 1:
@@ -265,10 +255,10 @@ class CaseStudyGrader:
     def grade_task_1(self, device_files, group_number):
         """
         Grades Task 1: Addressing.
-        Validates IP addresses, interfaces, and VLANs using diff logic.
+        Validates IP addresses, interfaces, and VLANs using new rubric.
         """
         comments = []
-        grade = 10.0  # Start with full marks, deduct 0.1 per issue
+        grade = 3.5  # Start with full marks, deduct 0.5 per incorrect or missing configuration
 
         # Dynamically adjust working configs for group number
         expected_addresses = {
@@ -305,8 +295,19 @@ class CaseStudyGrader:
                 "Vlan100": f"199.212.32.254/24",
                 "Vlan300": f"209.165.200.254/24",
                 "Vlan400": f"198.51.100.254/24"
-            },
+            }
         }
+
+        # SVIs for TOR-D1, TOR-A1 and TOR-A2 cz they be special
+        svi_addresses = {
+            "Vlan10": f"172.16.{group_number}.0/24",
+            f"Vlan{200 + group_number}": f"172.16.{100+group_number}.0/24",
+            f"Vlan{300 + group_number}": f"172.16.{200+group_number}.0/24"
+        }
+
+        def is_ip_in_subnet(ip, subnet):
+            """Helper function to check if an IP address is in a subnet."""
+            return ip_address(ip) in ip_network(subnet)
 
         for device, filepath in device_files.items():
             print(f"[INFO] Grading file: {filepath}")
@@ -314,56 +315,86 @@ class CaseStudyGrader:
                 submission = CiscoConfParse(filepath)
                 print(f"[INFO] Detected hostname: {device}")
 
-                for interface, expected_ip_cidr in expected_addresses[device].items():
-                    ip, expected_mask = cidr_to_decimal(expected_ip_cidr)
-                    print(f"[INFO] Checking {device} - Interface: {interface}")
+                # Check main device IP addresses
+                if device in expected_addresses:
+                    for interface, expected_ip_cidr in expected_addresses[device].items():
+                        ip, expected_mask = cidr_to_decimal(expected_ip_cidr)
+                        print(f"[INFO] Checking {device} - Interface: {interface}")
 
-                    interface_obj = submission.find_objects(rf"^interface {interface}")
-                    if not interface_obj:
-                        print(f"[WARNING] {device} - Missing interface {interface}")
-                        comments.append(f"{device} Missing interface {interface}")
-                        grade -= 0.1
-                        continue
+                        interface_obj = submission.find_objects(rf"^interface {interface}")
+                        if not interface_obj:
+                            print(f"[WARNING] {device} - Missing interface {interface}")
+                            comments.append(f"{device} Missing interface {interface}")
+                            grade -= 0.5
+                            continue
 
-                    found_ip = False
-                    for child in interface_obj[0].children:
-                        if "ip address" in child.text:
-                            parts = child.text.strip().split()
-                            actual_ip, actual_mask = parts[2], parts[3]
-                            if actual_ip == ip and actual_mask == expected_mask:
-                                print(f"[INFO] {device} - Interface {interface}: Correct IP ({actual_ip}/{actual_mask})")
-                                found_ip = True
-                                break
+                        found_ip = False
+                        for child in interface_obj[0].children:
+                            if "ip address" in child.text:
+                                parts = child.text.strip().split()
+                                actual_ip, actual_mask = parts[2], parts[3]
+                                if actual_ip == ip and actual_mask == expected_mask:
+                                    print(f"[INFO] {device} - Interface {interface}: Correct IP ({actual_ip}/{actual_mask})")
+                                    found_ip = True
+                                    break
 
-                    if not found_ip:
-                        print(f"[WARNING] {device} - Interface {interface}: Expected {ip}/{expected_mask}, but not found")
-                        comments.append(f"{device} Incorrect IP on {interface} (Expected: {ip}/{expected_mask})")
-                        grade -= 0.1
+                        if not found_ip:
+                            print(f"[WARNING] {device} - Interface {interface}: Expected {ip}/{expected_mask}, but not found")
+                            comments.append(f"{device} Incorrect IP on {interface} (Expected: {ip}/{expected_mask})")
+                            grade -= 0.5
+
+                # Check TOR-D1, TOR-A1 and TOR-A2 SVIs
+                if device in ["TOR-D1", "TOR-A1", "TOR-A2"]:
+                    for svi, expected_subnet in svi_addresses.items():
+                        print(f"[INFO] Checking {device} - SVI: {svi}")
+
+                        svi_obj = submission.find_objects(rf"^interface {svi}")
+                        if not svi_obj:
+                            print(f"[WARNING] {device} - Missing SVI {svi}")
+                            comments.append(f"{device} Missing SVI {svi}")
+                            grade -= 0.5
+                            continue
+
+                        found_ip = False
+                        for child in svi_obj[0].children:
+                            if "ip address" in child.text:
+                                parts = child.text.strip().split()
+                                actual_ip = parts[2]
+                                if is_ip_in_subnet(actual_ip, expected_subnet):
+                                    print(f"[INFO] {device} - SVI {svi}: Correct IP in range {expected_subnet}")
+                                    found_ip = True
+                                    break
+
+                        if not found_ip:
+                            print(f"[WARNING] {device} - SVI {svi}: Expected IP in range {expected_subnet}, but not found")
+                            comments.append(f"{device} Incorrect IP on SVI {svi} (Expected: {expected_subnet})")
+                            grade -= 0.5
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
                 comments.append(f"{device} Parse error")
 
-        grade = max(0, grade)
+
+        grade = max(0, grade)  # Ensure grade doesn't drop below 0
         return {"grade": grade, "comments": " | ".join(comments)}
     
     def grade_task_2(self, device_files, group_number):
         """
         Grades Task 2: Switch Configuration.
-        Validates trunk links, EtherChannels, and SVIs according to the provided criteria.
+        Validates trunk links, EtherChannels, and SVIs according to the rubric.
         """
         comments = []
-        grade = 15.0  # Start with full marks, deduct for issues found.
+        grade = 31.0  # Start with full marks, deduct for issues found.
 
         # Define switches and exclude routers
         switch_devices = ["TOR-D1", "TOR-D2", "TOR-A1", "TOR-A2"]
 
         # Validation criteria
         trunk_interfaces = {
-            "TOR-D1": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4", 
+            "TOR-D1": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4",
                     "GigabitEthernet1/0/5", "GigabitEthernet1/0/6", "GigabitEthernet1/0/7", "GigabitEthernet1/0/8", 
                     "GigabitEthernet1/0/11"],
-            "TOR-D2": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4",
+            "TOR-D2": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4", 
                     "GigabitEthernet1/0/5", "GigabitEthernet1/0/6", "GigabitEthernet1/0/7", "GigabitEthernet1/0/8"],
             "TOR-A1": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4"],
             "TOR-A2": ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2", "GigabitEthernet1/0/3", "GigabitEthernet1/0/4"]
@@ -384,6 +415,24 @@ class CaseStudyGrader:
 
         svi_interfaces = [f"Vlan10", f"Vlan{group_number + 200}", f"Vlan{group_number + 300}"]  # Adjust SVIs dynamically based on group number
 
+        # Unused interfaces - spot check a few ports, and make sure they're shutdown and set to VLAN 999
+        unused_interfaces = {
+            "TOR-D1": ["GigabitEthernet1/0/13", "GigabitEthernet1/0/14", "GigabitEthernet1/0/15"],
+            "TOR-D2": ["GigabitEthernet1/0/16", "GigabitEthernet1/0/17", "GigabitEthernet1/0/18"],
+            "TOR-A1": ["GigabitEthernet1/0/19", "GigabitEthernet1/0/20", "GigabitEthernet1/0/21"],
+            "TOR-A2": ["GigabitEthernet1/0/22", "GigabitEthernet1/0/23", "GigabitEthernet1/0/24"]
+        }
+
+        points_distribution = {
+            "trunks_and_dtp": 5,
+            "vlan_pruning": 8,
+            "tor_d1_g1_0_11": 2,
+            "tor_d2_access_ports": 2,
+            "unused_ports": 2,
+            "etherchannels": 8,
+            "svis": 4
+        }
+
         # Iterate through detected files for switch devices
         for device, filepath in device_files.items():
             if device not in switch_devices:
@@ -394,93 +443,192 @@ class CaseStudyGrader:
             try:
                 submission = CiscoConfParse(filepath)
 
-                # Task 2.1: Validate Trunk Interfaces
+                # Task 2.3: Validate Static Trunk Links and Disable DTP
+                all_nonegotiate = True
                 if device in trunk_interfaces:
+                    print(f"[INFO] Validating trunk links for {device}...")
                     for interface in trunk_interfaces[device]:
                         interface_obj = submission.find_objects(rf"^interface {interface}")
                         if not interface_obj:
                             print(f"[WARNING] {device} - Missing trunk interface {interface}.")
                             comments.append(f"{device} Missing trunk interface {interface}")
-                            grade -= 0.5
+                            grade -= 1.0 / len(trunk_interfaces)  # Split 1 point across switches
                             continue
 
                         children = [child.text.strip() for child in interface_obj[0].children]
                         if "switchport mode trunk" not in children:
                             print(f"[WARNING] {device} - Interface {interface} is not a trunk.")
                             comments.append(f"{device} Interface {interface} is not a trunk")
-                            grade -= 0.5
+                            grade -= 1.0 / len(trunk_interfaces)
                         if "switchport nonegotiate" not in children:
-                            print(f"[WARNING] {device} - DTP not disabled on {interface}.")
-                            comments.append(f"{device} DTP not disabled on {interface}")
-                            grade -= 0.2
-                        if interface == "GigabitEthernet1/0/11" and device == "TOR-D1":
-                            print(f"[INFO] Skipping native VLAN check for {device} - {interface}.")
-                        elif "switchport trunk native vlan 123" not in children:
-                            print(f"[WARNING] {device} - Native VLAN is not set to 123 on {interface}.")
-                            comments.append(f"{device} Native VLAN not set to 123 on {interface}")
-                            grade -= 0.2
+                            all_nonegotiate = False
 
-                # Task 2.2: Validate EtherChannels
+                # Give bonus 1 point if all trunk links have nonegotiate
+                if all_nonegotiate:
+                    print(f"[INFO] Awarding 1 bonus point for nonegotiate on all trunk links.")
+                    grade += 1.0
+                
+                # Task 2.4: Validate VLAN Pruning
+                print(f"[INFO] Validating VLAN pruning for {device}...")
+                vlan_pruning = {
+                    "TOR-D1": {
+                        "Port-channel1": "10,100," + str(group_number + 200) + "," + str(group_number + 300),
+                        "Port-channel2": "10," + str(group_number + 200) + "," + str(group_number + 300),
+                        "Port-channel3": "10," + str(group_number + 200) + "," + str(group_number + 300)
+                    },
+                    "TOR-D2": {
+                        "Port-channel1": "10,100," + str(group_number + 200) + "," + str(group_number + 300),
+                        "Port-channel2": "10," + str(group_number + 200) + "," + str(group_number + 300),
+                        "Port-channel3": "10," + str(group_number + 200) + "," + str(group_number + 300)
+                    }
+                }
+
+                # Iterate over each Port-channel interface and validate mandatory VLANs
+                for pc_interface, vlan_list in vlan_pruning.get(device, {}).items():
+                    mandatory_vlans = vlan_list.split(",")
+                    # Locate the Port-channel interface
+                    pc_obj = submission.find_objects(rf"^interface {pc_interface}")
+                    if not pc_obj:
+                        print(f"[WARNING] {device} - Missing {pc_interface}.")
+                        comments.append(f"{device} Missing {pc_interface}")
+                        grade -= points_distribution["vlan_pruning"] / len(vlan_pruning[device])
+                        continue
+
+                    # Check VLAN pruning configuration on the Port-channel
+                    children = [child.text.strip() for child in pc_obj[0].children]
+                    allowed_vlans = None
+                    for child in children:
+                        if "switchport trunk allowed vlan" in child:
+                            allowed_vlans = child.replace("switchport trunk allowed vlan ", "").split(",")
+
+                    # Validate mandatory VLANs
+                    for vlan in mandatory_vlans:
+                        if allowed_vlans and vlan not in allowed_vlans:
+                            print(f"[WARNING] {device} - Missing mandatory VLAN {vlan} on {pc_interface}.")
+                            comments.append(f"{device} Missing mandatory VLAN {vlan} on {pc_interface}")
+                            grade -= points_distribution["vlan_pruning"] / len(mandatory_vlans)
+
+                # Task 2.5: TOR-D1 G1/0/11 Configuration
+                print(f"[INFO] Validating TOR-D1 G1/0/11 configuration...")
+                if device == "TOR-D1":
+                    interface_obj = submission.find_objects(r"^interface GigabitEthernet1/0/11")
+                    if not interface_obj:
+                        print(f"[WARNING] {device} - Missing interface G1/0/11.")
+                        comments.append(f"{device} Missing interface G1/0/11")
+                        grade -= points_distribution["tor_d1_g1_0_11"]
+
+                # Task 2.6: Validate TOR-D2 Access Ports
+                print(f"[INFO] Validating TOR-D2 access ports configuration...")
+                if device == "TOR-D2":
+                    for interface, vlan in {"GigabitEthernet1/0/11": 300, "GigabitEthernet1/0/12": 400}.items():
+                        interface_obj = submission.find_objects(rf"^interface {interface}")
+                        if not interface_obj:
+                            print(f"[WARNING] {device} - Missing interface {interface}.")
+                            comments.append(f"{device} Missing interface {interface}")
+                            grade -= points_distribution["tor_d2_access_ports"] / 2  # Split between both interfaces
+                            continue
+
+                        children = [child.text.strip() for child in interface_obj[0].children]
+                        if f"switchport access vlan {vlan}" not in children:
+                            print(f"[WARNING] {device} - Interface {interface} not assigned to VLAN {vlan}.")
+                            comments.append(f"{device} Interface {interface} not assigned to VLAN {vlan}")
+                            grade -= points_distribution["tor_d2_access_ports"] / 2
+                        if "switchport mode access" not in children:
+                            print(f"[WARNING] {device} - Interface {interface} is not configured as an access port.")
+                            comments.append(f"{device} Interface {interface} is not configured as an access port")
+                            grade -= points_distribution["tor_d2_access_ports"] / 2
+
+                # Task 2.7: Validate Unused Ports
+                print(f"[INFO] Validating unused ports for {device}...")
+                for unused_port in unused_interfaces.get(device, []):
+                    interface_obj = submission.find_objects(rf"^interface {unused_port}")
+                    if not interface_obj:
+                        print(f"[WARNING] {device} - Missing configuration for unused port {unused_port}.")
+                        comments.append(f"{device} Missing configuration for unused port {unused_port}")
+                        grade -= points_distribution["unused_ports"] / len(unused_interfaces[device])  # Split points across unused ports
+                        continue
+
+                    children = [child.text.strip() for child in interface_obj[0].children]
+                    if "switchport access vlan 999" not in children:
+                        print(f"[WARNING] {device} - Unused port {unused_port} not assigned to VLAN 999.")
+                        comments.append(f"{device} Unused port {unused_port} not assigned to VLAN 999")
+                        grade -= points_distribution["unused_ports"] / len(unused_interfaces[device])
+                    if "shutdown" not in children:
+                        print(f"[WARNING] {device} - Unused port {unused_port} is not shut down.")
+                        comments.append(f"{device} Unused port {unused_port} is not shut down")
+                        grade -= points_distribution["unused_ports"] / len(unused_interfaces[device])
+
+                # Task 2.8: Validate EtherChannels
+                print(f"[INFO] Validating EtherChannels for {device}...")
+
                 if device in etherchannel_interfaces:
                     for port_channel, member_interfaces in etherchannel_interfaces[device].items():
+                        # Locate the Port-channel interface
                         pc_obj = submission.find_objects(rf"^interface {port_channel}")
                         if not pc_obj:
                             print(f"[WARNING] {device} - {port_channel} is missing.")
                             comments.append(f"{device} Missing EtherChannel {port_channel}")
-                            grade -= 1.0
+                            grade -= points_distribution["etherchannels"] / len(etherchannel_interfaces[device])
                             continue
 
-                        # Check protocol from member interface configurations
-                        protocol = "Static"  # Default to Static if no mode is found
+                        # Expected protocol for the Port-channel
+                        expected_protocol = (
+                            "Static" if port_channel == "Port-channel1" else
+                            ("PAgP" if port_channel == "Port-channel2" and device in ["TOR-D1", "TOR-A1"] else
+                            "LACP" if port_channel == "Port-channel2" and device in ["TOR-D2", "TOR-A2"] else
+                            "PAgP" if port_channel == "Port-channel3" and device in ["TOR-D1", "TOR-A2"] else
+                            "LACP" if port_channel == "Port-channel3" and device in ["TOR-D2", "TOR-A1"] else None)
+                        )
+
+                        # Detect protocol from member interfaces
+                        detected_protocol = None
                         for interface in member_interfaces:
                             int_obj = submission.find_objects(rf"^interface {interface}")
                             if not int_obj:
                                 print(f"[WARNING] {device} - Missing interface {interface} in {port_channel}.")
                                 comments.append(f"{device} Missing interface {interface} in {port_channel}")
-                                grade -= 0.5
+                                grade -= (points_distribution["etherchannels"] / len(etherchannel_interfaces[device])) / len(member_interfaces)
                                 continue
 
+                            # Parse channel-group mode for protocol detection
                             children = [child.text.strip() for child in int_obj[0].children]
                             for line in children:
                                 if "channel-group" in line:
                                     if "mode on" in line:
-                                        protocol = "Static"
-                                    elif "mode desirable" in line or "mode auto" in line or "mode desirable non-silent" in line:
-                                        protocol = "PAgP"
-                                    elif "mode active" in line or "mode passive" in line:
-                                        protocol = "LACP"
+                                        detected_protocol = "Static"
+                                    elif any(mode in line for mode in ["mode auto", "mode desirable", "mode desirable non-silent"]):
+                                        detected_protocol = "PAgP"
+                                    elif any(mode in line for mode in ["mode active", "mode passive"]):
+                                        detected_protocol = "LACP"
                                     break
 
-                        print(f"[INFO] {device} - {port_channel} configured with protocol {protocol}.")
+                        print(f"[INFO] {device} - {port_channel} detected protocol: {detected_protocol}")
 
-                        # Validate member interfaces
-                        for interface in member_interfaces:
-                            int_obj = submission.find_objects(rf"^interface {interface}")
-                            if not int_obj:
-                                print(f"[WARNING] {device} - Missing interface {interface} in {port_channel}.")
-                                comments.append(f"{device} Missing interface {interface} in {port_channel}")
-                                grade -= 0.5
+                        # Compare detected protocol with expected protocol
+                        if detected_protocol != expected_protocol:
+                            print(f"[WARNING] {device} - {port_channel} missing or incorrect protocol (Expected: {expected_protocol}, Detected: {detected_protocol}).")
+                            comments.append(f"{device} {port_channel} missing or incorrect protocol (Expected: {expected_protocol})")
+                            grade -= points_distribution["etherchannels"] / len(etherchannel_interfaces[device])
+                        else:
+                            print(f"[INFO] {device} - {port_channel} protocol is correctly configured as {detected_protocol}.")
 
-                # Task 2.3: Validate SVIs
+                # Task 2.9: Validate SVIs
+                print(f"[INFO] Validating SVIs for {device}...")
+
+                # Award points if the SVIs exist for the switch
                 for svi in svi_interfaces:
                     svi_obj = submission.find_objects(rf"^interface {svi}")
                     if not svi_obj:
-                        print(f"[WARNING] {device} - SVI {svi} is not configured.")
+                        print(f"[WARNING] {device} - Missing SVI {svi}.")
                         comments.append(f"{device} Missing SVI {svi}")
-                        grade -= 0.3
-                        continue
-
-                    svi_children = [child.text.strip() for child in svi_obj[0].children]
-                    if not any("ip address" in line for line in svi_children):
-                        print(f"[WARNING] {device} - SVI {svi} does not have an IP address.")
-                        comments.append(f"{device} SVI {svi} missing IP address")
-                        grade -= 0.3
+                        grade -= points_distribution["svis"] / len(svi_interfaces)
+                    else:
+                        print(f"[INFO] {device} - SVI {svi} exists. Awarding marks.")
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
                 comments.append(f"{device} Parse error")
 
-        # Final Grade
         grade = max(0, grade)
         return {"grade": grade, "comments": " | ".join(comments)}
 
@@ -490,7 +638,7 @@ class CaseStudyGrader:
         Validates root bridge priorities, port costs, and other spanning tree configurations.
         """
         comments = []
-        grade = 10.0  # Total points for Task 3
+        grade = 9.0  # Total points for Task 3
 
         # Define switches and exclude routers
         switch_devices = ["TOR-D1", "TOR-D2", "TOR-A1", "TOR-A2"]
@@ -540,7 +688,7 @@ class CaseStudyGrader:
                         else:
                             print(f"[WARNING] {device} - VLAN 10 or 3xx priority is not lower than VLAN 2xx.")
                             comments.append(f"{device} Incorrect priority relationship for VLAN 10/3xx vs 2xx")
-                            grade -= 0.5
+                            grade -= 1.0 / 2.0 # Deduct 1 point for each incorrect priority
 
                     # Validate TOR-D2 priorities
                     if device == "TOR-D2":
@@ -549,31 +697,43 @@ class CaseStudyGrader:
                         else:
                             print(f"[WARNING] {device} - VLAN 2xx priority is not lower than VLAN 10 or 3xx.")
                             comments.append(f"{device} Incorrect priority relationship for VLAN 2xx vs 10/3xx")
-                            grade -= 0.5
+                            grade -= 1.0 / 2.0 # Deduct 1 point for each incorrect priority
 
                 # Task 3.2: Validate Spanning Tree Port Costs
                 if device == "TOR-A1":
-                    print(f"[INFO] Validating spanning-tree port costs for VLAN 10 on {device}...")
+                    print(f"[INFO] Validating spanning-tree port costs on {device}...")
+
+                    # Locate Port-channel2 interface
                     po2_interface = submission.find_objects(r"^interface Port-channel2")
                     if po2_interface:
-                        # Access child lines using 'children'
-                        po2_children = po2_interface[0].children
+                        po2_children = [child.text.strip() for child in po2_interface[0].children]
+                        print(f"[DEBUG] {device} Port-channel2 Children: {po2_children}")
+
+                        # Dynamically calculate expected cost
                         expected_cost = (2 * group_number) + 10
+                        cost_detected = False
+
+                        # Check for any 'spanning-tree vlan <vlan_id> cost <value>' command
                         for line in po2_children:
-                            if "spanning-tree cost" in line.text:
-                                if str(expected_cost) not in line.text:
-                                    print(f"[WARNING] {device} - Port-channel2 cost for VLAN 10 is not set to {expected_cost}.")
-                                    comments.append(f"{device} Incorrect Port-channel2 cost for VLAN 10 (Expected: {expected_cost})")
-                                    grade -= 0.5
+                            match = re.search(r"spanning-tree(?: vlan \d+)? cost (\d+)", line)
+                            if match:
+                                actual_cost = int(match.group(1))
+                                if actual_cost == expected_cost:
+                                    print(f"[INFO] {device} - Port-channel2 cost is correctly set to {expected_cost}.")
+                                    cost_detected = True
+                                    break
                                 else:
-                                    print(f"[INFO] {device} - Port-channel2 cost for VLAN 10 is correctly set to {expected_cost}.")
-                                break
-                        else:
-                            print(f"[WARNING] {device} - Port-channel2 cost for VLAN 10 is missing.")
-                            comments.append(f"{device} Missing Port-channel2 cost for VLAN 10")
-                            grade -= 0.5
-                    else:
-                        print(f"[INFO] {device} - Port-channel2 cost for VLAN 10 is correctly set to {expected_cost}.")
+                                    print(f"[WARNING] {device} - Port-channel2 cost exists but is set to {actual_cost} instead of {expected_cost}.")
+                                    comments.append(f"{device} Incorrect spanning-tree cost (Expected: {expected_cost}, Found: {actual_cost})")
+                                    grade -= 1.0
+                                    cost_detected = True
+                                    break
+                        
+                        # If no cost command is found
+                        if not cost_detected:
+                            print(f"[WARNING] {device} - Port-channel2 cost command is missing.")
+                            comments.append(f"{device} Missing spanning-tree cost command")
+                            grade -= 1.0
 
                 # Task 3.3: Validate PortFast and BPDU Guard
                 if device in ["TOR-A1", "TOR-A2"]:
@@ -584,18 +744,18 @@ class CaseStudyGrader:
                         if not port_obj:
                             print(f"[WARNING] {device} - Access port {port} is missing.")
                             comments.append(f"{device} Missing configuration for access port {port}")
-                            grade -= 0.2
+                            grade -= 2.0 / len(access_ports) 
                             continue
 
                         children = [child.text.strip() for child in port_obj[0].children]
                         if "spanning-tree portfast" not in children:
                             print(f"[WARNING] {device} - PortFast is not enabled on {port}.")
                             comments.append(f"{device} PortFast not enabled on {port}")
-                            grade -= 0.1
+                            grade -= 1.0 / len(access_ports)
                         if "spanning-tree bpduguard enable" not in children:
                             print(f"[WARNING] {device} - BPDU Guard is not enabled on {port}.")
                             comments.append(f"{device} BPDU Guard not enabled on {port}")
-                            grade -= 0.1
+                            grade -= 1.0 / len(access_ports)
 
                 # Task 3.4: Validate Root Guard
                 if device in ["TOR-D1", "TOR-D2"]:
@@ -606,14 +766,14 @@ class CaseStudyGrader:
                         if not port_obj:
                             print(f"[WARNING] {device} - Root Guard port {port} is missing.")
                             comments.append(f"{device} Missing Root Guard port {port}")
-                            grade -= 0.5
+                            grade -= 2.0 / len(root_guard_ports)
                             continue
 
                         children = [child.text.strip() for child in port_obj[0].children]
                         if "spanning-tree guard root" not in children:
                             print(f"[WARNING] {device} - Root Guard is not enabled on {port}.")
                             comments.append(f"{device} Root Guard not enabled on {port}")
-                            grade -= 0.5
+                            grade -= 2.0 / len(root_guard_ports)
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
@@ -626,10 +786,10 @@ class CaseStudyGrader:
     def grade_task_4(self, device_files, group_number):
         """
         Grades Task 4: Configure First Hop Redundancy.
-        Validates HSRPv2, primary gateways, preemption, and group configurations.
+        Validates HSRPv2, primary gateways, preemption, virtual IPs, object tracking, and default gateway configuration.
         """
         comments = []
-        grade = 10.0  # Total points for Task 4
+        grade = 17.0  # Total points for Task 4 based on rubric
 
         # Calculate dynamic VLAN numbers and HSRP group numbers
         vlan_2xx = 200 + group_number
@@ -638,7 +798,7 @@ class CaseStudyGrader:
         hsrp_group_2xx = (2 * group_number) + vlan_2xx
         hsrp_group_3xx = (2 * group_number) + vlan_3xx
 
-        # Check devices
+        # Iterate through device files
         for device, filepath in device_files.items():
             if device not in ["TOR-D1", "TOR-D2", "TOR-A1", "TOR-A2"]:
                 print(f"[INFO] Skipping {device}: Task 4 does not apply.")
@@ -648,9 +808,11 @@ class CaseStudyGrader:
             try:
                 submission = CiscoConfParse(filepath)
 
-                # HSRP Validation for TOR-D1 and TOR-D2
+                # Validation logic for TOR-D1 and TOR-D2
                 if device in ["TOR-D1", "TOR-D2"]:
                     print(f"[INFO] Validating HSRPv2 configuration on {device}...")
+                    
+                    # Define VLANs and HSRP groups for TOR-D1 and TOR-D2
                     vlans = [10, vlan_2xx, vlan_3xx]
                     hsrp_groups = [hsrp_group_10, hsrp_group_2xx, hsrp_group_3xx]
                     priorities = {}
@@ -660,11 +822,8 @@ class CaseStudyGrader:
                         if not vlan_interface:
                             print(f"[WARNING] {device} - Missing interface Vlan{vlan} for HSRP.")
                             comments.append(f"{device} Missing interface Vlan{vlan}")
-                            grade -= 0.5
-                            priorities[vlan] = 100  # Assume default priority for missing interfaces
                             continue
 
-                        # Parse children of the interface
                         children = [child.text.strip() for child in vlan_interface[0].children]
 
                         # Validate HSRPv2
@@ -673,10 +832,10 @@ class CaseStudyGrader:
                             comments.append(f"{device} Missing HSRPv2 for VLAN {vlan}")
                             grade -= 0.5
 
-                        # Validate preemption
-                        if f"standby {group} preempt" not in " ".join(children):
-                            print(f"[WARNING] {device} - Preemption not enabled for VLAN {vlan}.")
-                            comments.append(f"{device} Missing preemption for VLAN {vlan}")
+                        # Validate HSRP group number
+                        if f"standby {group} " not in " ".join(children):
+                            print(f"[WARNING] {device} - Incorrect HSRP group for VLAN {vlan}.")
+                            comments.append(f"{device} Incorrect HSRP group for VLAN {vlan}")
                             grade -= 0.5
 
                         # Extract priority
@@ -686,43 +845,67 @@ class CaseStudyGrader:
                         else:
                             print(f"[WARNING] {device} - Priority configuration missing for VLAN {vlan}.")
                             priorities[vlan] = 100  # Assume default priority for missing priorities
-                            print(f"[INFO] {device} - Priority for VLAN {vlan} is assumed to be 100.")
 
-                        # Validate virtual IP
-                        if f"standby {group} ip" not in " ".join(children):
-                            print(f"[WARNING] {device} - Virtual IP missing for VLAN {vlan}.")
-                            comments.append(f"{device} Missing virtual IP for VLAN {vlan}")
-                            grade -= 0.5
-
-                    # Priority validation (Primary gateway logic)
+                    # Primary Gateway Validation
                     if device == "TOR-D1":
                         if priorities.get(10) and priorities.get(vlan_3xx) and priorities.get(vlan_2xx):
-                            if priorities[10] <= priorities[vlan_2xx] or priorities[vlan_3xx] <= priorities[vlan_2xx]:
-                                print(f"[WARNING] {device} - Incorrect priority relationship for VLAN 10/3xx vs 2xx.")
-                                comments.append(f"{device} Priority for VLAN 10/3xx not higher than 2xx")
-                                grade -= 0.5
+                            if priorities[10] <= priorities[vlan_2xx]:
+                                print(f"[WARNING] {device} - Priority for VLAN 10 is not higher than VLAN 2xx.")
+                                comments.append(f"{device} Priority for VLAN 10 not higher than VLAN 2xx")
+                                grade -= 0.75
+                            if priorities[vlan_3xx] <= priorities[vlan_2xx]:
+                                print(f"[WARNING] {device} - Priority for VLAN 3xx is not higher than VLAN 2xx.")
+                                comments.append(f"{device} Priority for VLAN 3xx not higher than VLAN 2xx")
+                                grade -= 0.75
 
                     if device == "TOR-D2":
                         if priorities.get(10) and priorities.get(vlan_3xx) and priorities.get(vlan_2xx):
-                            if priorities[vlan_2xx] <= priorities[10] or priorities[vlan_2xx] <= priorities[vlan_3xx]:
-                                print(f"[WARNING] {device} - Incorrect priority relationship for VLAN 2xx vs 10/3xx.")
-                                comments.append(f"{device} Priority for VLAN 2xx not higher than 10/3xx")
-                                grade -= 0.5
+                            if priorities[vlan_2xx] <= priorities[10]:
+                                print(f"[WARNING] {device} - Priority for VLAN 2xx is not higher than VLAN 10.")
+                                comments.append(f"{device} Priority for VLAN 2xx not higher than VLAN 10")
+                                grade -= 0.75
+                            if priorities[vlan_2xx] <= priorities[vlan_3xx]:
+                                print(f"[WARNING] {device} - Priority for VLAN 2xx is not higher than VLAN 3xx.")
+                                comments.append(f"{device} Priority for VLAN 2xx not higher than VLAN 3xx")
+                                grade -= 0.75
 
-                # Object Tracking Validation for TOR-D2
-                if device == "TOR-D2":
-                    print(f"[INFO] Validating object tracking on {device} for VLAN {vlan_2xx}...")
-                    vlan_interface = submission.find_objects(rf"^interface Vlan{vlan_2xx}")
-                    if vlan_interface:
-                        children = [child.text.strip() for child in vlan_interface[0].children]
-                        if f"standby {hsrp_group_2xx} track {hsrp_group_2xx}" not in " ".join(children):
-                            print(f"[WARNING] {device} - Object tracking not configured for VLAN {vlan_2xx}.")
-                            comments.append(f"{device} Missing object tracking for VLAN {vlan_2xx}")
-                            grade -= 1.0
-                        if "decrement" not in " ".join(children):
-                            print(f"[WARNING] {device} - Priority decrement not configured for VLAN {vlan_2xx}.")
-                            comments.append(f"{device} Missing priority decrement for VLAN {vlan_2xx}")
-                            grade -= 0.5
+                    # Preemption Validation
+                    for vlan, group in zip(vlans, hsrp_groups):
+                        vlan_interface = submission.find_objects(rf"^interface Vlan{vlan}")
+                        if vlan_interface:
+                            children = [child.text.strip() for child in vlan_interface[0].children]
+                            if f"standby {group} preempt" not in " ".join(children):
+                                print(f"[WARNING] {device} - Preemption not enabled for VLAN {vlan}.")
+                                comments.append(f"{device} Missing preemption for VLAN {vlan}")
+                                grade -= 1.5 / len(vlans)
+
+                    # Virtual IP Validation
+                    for vlan, group in zip(vlans, hsrp_groups):
+                        vlan_interface = submission.find_objects(rf"^interface Vlan{vlan}")
+                        if vlan_interface:
+                            children = [child.text.strip() for child in vlan_interface[0].children]
+                            if f"standby {group} ip" not in " ".join(children):
+                                print(f"[WARNING] {device} - Virtual IP missing for VLAN {vlan}.")
+                                comments.append(f"{device} Missing virtual IP for VLAN {vlan}")
+                                grade -= 1.0 / len(vlans)
+
+                    # Object Tracking Validation for TOR-D2
+                    if device == "TOR-D2":
+                        vlan_interface = submission.find_objects(rf"^interface Vlan{vlan_2xx}")
+                        if vlan_interface:
+                            children = [child.text.strip() for child in vlan_interface[0].children]
+
+                            # Validate standby tracking configuration
+                            if f"standby {hsrp_group_2xx} track {hsrp_group_2xx}" not in " ".join(children):
+                                print(f"[WARNING] {device} - Object tracking not configured for VLAN {vlan_2xx}.")
+                                comments.append(f"{device} Missing object tracking for VLAN {vlan_2xx}")
+                                grade -= 1.0
+
+                            # Validate decrement tracking for Port-channel2
+                            if "decrement" not in " ".join(children):
+                                print(f"[WARNING] {device} - Missing decrement tracking for VLAN {vlan_2xx}.")
+                                comments.append(f"{device} Missing decrement tracking for VLAN {vlan_2xx}")
+                                grade -= 1.0
 
                 # Default Gateway Validation for TOR-A1 and TOR-A2
                 if device in ["TOR-A1", "TOR-A2"]:
@@ -731,8 +914,8 @@ class CaseStudyGrader:
                     expected_gateway = f"172.16.{group_number}.254"
                     if not default_gateway_obj or expected_gateway not in default_gateway_obj[0].text:
                         print(f"[WARNING] {device} - Default gateway not configured correctly for VLAN 10.")
-                        comments.append(f"{device} Incorrect default gateway for VLAN 10")
                         grade -= 1.0
+                        comments.append(f"{device} Missing default gateway for VLAN 10")
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
@@ -748,7 +931,7 @@ class CaseStudyGrader:
         Validates MPLS on specific links, label protocol, and LDP router ID configuration.
         """
         comments = []
-        grade = 12.0  # Total points for Task 5
+        grade = 10.0  # Total points for Task 5
 
         # Interface mapping for MPLS links
         interfaces = {
@@ -773,18 +956,18 @@ class CaseStudyGrader:
                     print(f"[INFO] Validating MPLS configuration on {device}...")
                     if device == "ISP":
                         isp_interfaces = [interfaces["ISP_Toronto"], interfaces["ISP_Ottawa"]]
+                        print(f"[DEBUG] Validating ISP interfaces: {isp_interfaces}")
                         for interface in isp_interfaces:
+                            print(f"[DEBUG] Checking interface: {interface}")
                             interface_obj = submission.find_objects(rf"^interface {interface}")
                             if not interface_obj:
                                 print(f"[WARNING] {device} - Interface {interface} not found.")
                                 comments.append(f"{device} Missing interface {interface}")
-                                grade -= 1.5
                                 continue
                             children = [child.text.strip() for child in interface_obj[0].children]
                             if "mpls ip" not in children:
                                 print(f"[WARNING] {device} - MPLS not enabled on {interface}.")
                                 comments.append(f"{device} MPLS missing on {interface}")
-                                grade -= 1.5
                             if "mpls label protocol ldp" not in children:
                                 print(f"[WARNING] {device} - MPLS label protocol LDP not configured on {interface}.")
                                 comments.append(f"{device} Missing label protocol LDP on {interface}")
@@ -795,24 +978,23 @@ class CaseStudyGrader:
                         if not interface_obj:
                             print(f"[WARNING] {device} - Interface {interface} not found.")
                             comments.append(f"{device} Missing interface {interface}")
-                            grade -= 1.5
                             continue
                         children = [child.text.strip() for child in interface_obj[0].children]
                         if "mpls ip" not in children:
                             print(f"[WARNING] {device} - MPLS not enabled on {interface}.")
                             comments.append(f"{device} MPLS missing on {interface}")
-                            grade -= 1.5
+                            grade -= 1.0  # Deduct 1 point for missing MPLS
                         if "mpls label protocol ldp" not in children:
-                            print(f"[WARNING] {device} - MPLS label protocol LDP not configured on {interface}.")
-                            comments.append(f"{device} Missing label protocol LDP on {interface}")
-                            grade -= 1.0
+                                print(f"[WARNING] {device} - MPLS label protocol LDP not configured on {interface}.")
+                                comments.append(f"{device} Missing label protocol LDP on {interface}")
+                                grade -= 1.0
 
                 # Validate LDP Router ID
                 print(f"[INFO] Validating LDP Router ID configuration on {device}...")
-                if not submission.find_objects(r"^mpls ldp router-id Loopback1 force"):
+                if not submission.find_objects(r"^mpls ldp router-id Loopback1"):
                     print(f"[WARNING] {device} - LDP Router ID not set to Loopback1.")
                     comments.append(f"{device} Missing LDP Router ID configuration")
-                    grade -= 1.0
+                    grade -= 1.0   # Deduct 1 point if LDP Router ID is missing or incorrect
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
@@ -829,7 +1011,7 @@ class CaseStudyGrader:
         Includes debug print statements for all detected configurations.
         """
         comments = []
-        grade = 20.0  # Total points for Task 6
+        grade = 38.0  # Total points for Task 6
 
         # Devices restricted to Toronto, Ottawa, and Oshawa
         valid_devices = ["Toronto", "Ottawa", "Oshawa", "TOR-D2"]
@@ -846,6 +1028,12 @@ class CaseStudyGrader:
             "Toronto": f"10.1.{group_number}.1",
             "Ottawa": f"10.1.{group_number}.2",
             "Oshawa": f"10.1.{group_number}.3"
+        }
+
+        internet_ips = {
+            "Toronto": f"199.212.32.{group_number}",
+            "Ottawa": f"209.165.200.{group_number}",
+            "Oshawa": f"198.51.100.{group_number}"
         }
 
         # Check each device
@@ -899,7 +1087,6 @@ class CaseStudyGrader:
                     if not tunnel_interface:
                         print(f"[WARNING] {device} - Tunnel1 interface not found.")
                         comments.append(f"{device} Missing Tunnel1 interface")
-                        grade -= 1.0
                         continue
 
                     children = [child.text.strip() for child in tunnel_interface[0].children]
@@ -909,7 +1096,7 @@ class CaseStudyGrader:
                     if "tunnel mode gre multipoint" not in children:
                         print(f"[WARNING] {device} - Multipoint GRE not configured on Tunnel1.")
                         comments.append(f"{device} Missing multipoint GRE")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # Check tunnel source
                     expected_source_interface = internet_interfaces[device]["interface"]
@@ -922,7 +1109,7 @@ class CaseStudyGrader:
                     if not tunnel_source_detected:
                         print(f"[WARNING] {device} - Tunnel source not correctly configured.")
                         comments.append(f"{device} Incorrect tunnel source")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # Check tunnel key
                     expected_key = 3 * group_number
@@ -931,7 +1118,7 @@ class CaseStudyGrader:
                     if not tunnel_key_detected:
                         print(f"[WARNING] {device} - Tunnel key not correctly configured.")
                         comments.append(f"{device} Incorrect tunnel key")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # Check Tunnel IP address
                     expected_ip = tunnel_ips[device]
@@ -942,7 +1129,7 @@ class CaseStudyGrader:
                     if not ip_address_detected:
                         print(f"[WARNING] {device} - Tunnel IP address not correctly configured.")
                         comments.append(f"{device} Incorrect Tunnel IP address")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # Check bandwidth and delay
                     bandwidth_detected = "bandwidth 1000000" in children
@@ -950,14 +1137,14 @@ class CaseStudyGrader:
                     if not bandwidth_detected:
                         print(f"[WARNING] {device} - Bandwidth not correctly configured.")
                         comments.append(f"{device} Missing bandwidth setting")
-                        grade -= 1.0
+                        grade -= 0.5
                     expected_delay = 2 * group_number + 20
                     delay_detected = f"delay {expected_delay}" in children
                     print(f"[DEBUG] {device} Delay Detected: {delay_detected}")
                     if not delay_detected:
                         print(f"[WARNING] {device} - Delay not correctly configured.")
                         comments.append(f"{device} Missing delay setting")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # NHRP Validation
                     print(f"[INFO] Validating NHRP configuration on {device}...")
@@ -966,7 +1153,7 @@ class CaseStudyGrader:
                     if not nhrp_network_detected:
                         print(f"[WARNING] {device} - NHRP network ID not correctly configured.")
                         comments.append(f"{device} Missing NHRP network ID")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     nhrp_authentication_detected = any(
                         "ip nhrp authentication" in line for line in children
@@ -975,7 +1162,7 @@ class CaseStudyGrader:
                     if not nhrp_authentication_detected:
                         print(f"[WARNING] {device} - NHRP authentication not configured.")
                         comments.append(f"{device} Missing NHRP authentication")
-                        grade -= 1.0
+                        grade -= 0.5
 
                     # Check for 'ip nhrp redirect' in Toronto
                     if device == "Toronto":
@@ -988,6 +1175,39 @@ class CaseStudyGrader:
                             comments.append(f"{device} Missing NHRP redirect")
                             grade -= 1.0
 
+                    # check for ip nhrp nhs on Ottawa and Oshawa, set to Toronto's tunnel IP
+                    if device in ["Ottawa", "Oshawa"]:
+                        nhrp_nhs_detected = any(
+                            f"ip nhrp nhs {tunnel_ips['Toronto']}" in line for line in children
+                        )
+                        print(f"[DEBUG] {device} NHRP NHS Detected: {nhrp_nhs_detected}")
+                        if not nhrp_nhs_detected:
+                            print(f"[WARNING] {device} - NHRP NHS not configured to Toronto's tunnel IP.")
+                            comments.append(f"{device} Incorrect NHRP NHS configuration")
+                            grade -= 1.0
+
+                    # check for static mapping of toronto's tunnel IP to its public IP on Ottawa and Oshawa
+                    if device in ["Ottawa", "Oshawa"]:
+                        nhrp_static_mapping_detected = any(
+                            f"ip nhrp map {tunnel_ips['Toronto']} {internet_ips['Toronto']}" in line for line in children
+                        )
+                        print(f"[DEBUG] {device} NHRP Static Mapping Detected: {nhrp_static_mapping_detected}")
+                        if not nhrp_static_mapping_detected:
+                            print(f"[WARNING] {device} - NHRP static mapping not configured for Toronto's tunnel IP.")
+                            comments.append(f"{device} Missing NHRP static mapping for Toronto's tunnel IP")
+                            grade -= 1.0
+
+                    # check for static mapping of multicast to toronto's tunnel IP on Ottawa and Oshawa
+                    if device in ["Ottawa", "Oshawa"]:
+                        nhrp_multicast_mapping_detected = any(
+                            f"ip nhrp map multicast {internet_ips['Toronto']}" in line for line in children
+                        )
+                        print(f"[DEBUG] {device} NHRP Multicast Mapping Detected: {nhrp_multicast_mapping_detected}")
+                        if not nhrp_multicast_mapping_detected:
+                            print(f"[WARNING] {device} - NHRP multicast mapping not configured for Toronto's tunnel IP.")
+                            comments.append(f"{device} Missing NHRP multicast mapping for Toronto's tunnel IP")
+                            grade -= 1.0
+
                     # IPSec Validation
                     print(f"[INFO] Validating IPSec configuration on {device}...")
 
@@ -997,7 +1217,7 @@ class CaseStudyGrader:
                     if not isakmp_detected:
                         print(f"[WARNING] {device} - ISAKMP key not correctly configured.")
                         comments.append(f"{device} Missing ISAKMP key")
-                        grade -= 2.0
+                        grade -= 0.5
 
                     # 2. Validate IKE Policy and Child Commands
                     ike_policy_obj = submission.find_objects(rf"^crypto isakmp policy {group_number}")
@@ -1005,7 +1225,7 @@ class CaseStudyGrader:
                     if not ike_policy_obj:
                         print(f"[WARNING] {device} - IKE policy {group_number} not found.")
                         comments.append(f"{device} Missing IKE policy {group_number}")
-                        grade -= 2.0
+                        grade -= 0.5
                     else:
                         ike_policy_children = [child.text.strip() for child in ike_policy_obj[0].children]
                         print(f"[DEBUG] {device} IKE Policy Children: {ike_policy_children}")
@@ -1013,7 +1233,7 @@ class CaseStudyGrader:
                             if setting not in " ".join(ike_policy_children):
                                 print(f"[WARNING] {device} - IKE policy missing required attribute: {setting}.")
                                 comments.append(f"{device} Incorrect IKE policy {setting}")
-                                grade -= 0.5
+                                grade -= 1.5
 
                     # 3. Validate IPSec Transform Set
                     transform_set_obj = submission.find_objects(r"^crypto ipsec transform-set .*_TRANS")
@@ -1021,7 +1241,7 @@ class CaseStudyGrader:
                     if not transform_set_obj:
                         print(f"[WARNING] {device} - IPSec transform set not correctly configured.")
                         comments.append(f"{device} Missing IPSec transform set")
-                        grade -= 2.0
+                        grade -= 0.5
                     else:
                         # Parse the parent line for encryption and hash
                         transform_set_line = transform_set_obj[0].text.strip()
@@ -1029,11 +1249,11 @@ class CaseStudyGrader:
                         if "esp-aes 256" not in transform_set_line:
                             print(f"[WARNING] {device} - IPSec transform set missing encryption esp-aes 256.")
                             comments.append(f"{device} Incorrect IPSec transform set encryption")
-                            grade -= 1.0
+                            grade -= 0.5
                         if "esp-sha512-hmac" not in transform_set_line:
                             print(f"[WARNING] {device} - IPSec transform set missing hash esp-sha512-hmac.")
                             comments.append(f"{device} Incorrect IPSec transform set hash")
-                            grade -= 1.0
+                            grade -= 0.5
 
                         # Parse child lines for mode transport
                         transform_set_children = [child.text.strip() for child in transform_set_obj[0].children]
@@ -1041,7 +1261,7 @@ class CaseStudyGrader:
                         if "mode transport" not in transform_set_children:
                             print(f"[WARNING] {device} - IPSec transform set missing mode transport.")
                             comments.append(f"{device} Incorrect IPSec transform set mode")
-                            grade -= 1.0
+                            grade -= 0.5
 
                     # 4. Validate IPSec Profile
                     profile_obj = submission.find_objects(r"^crypto ipsec profile .*_PROFILE")
@@ -1049,23 +1269,17 @@ class CaseStudyGrader:
                     if not profile_obj:
                         print(f"[WARNING] {device} - IPSec profile not correctly configured.")
                         comments.append(f"{device} Missing IPSec profile")
-                        grade -= 2.0
+                        grade -= 0.5
                     else:
                         profile_children = [child.text.strip() for child in profile_obj[0].children]
                         print(f"[DEBUG] {device} IPSec Profile Children: {profile_children}")
                         if f"set transform-set" not in " ".join(profile_children):
                             print(f"[WARNING] {device} - IPSec profile does not reference correct transform set.")
                             comments.append(f"{device} Missing IPSec profile transform-set reference")
-                            grade -= 1.0
+                            grade -= 0.5
 
                     # 5. Check if IPSec Profile Applied to Tunnel1
                     tunnel_interface = submission.find_objects(r"^interface Tunnel1")
-                    if not tunnel_interface:
-                        print(f"[WARNING] {device} - Tunnel1 interface not found.")
-                        comments.append(f"{device} Missing Tunnel1 interface")
-                        grade -= 1.0
-                        continue
-
                     children = [child.text.strip() for child in tunnel_interface[0].children]
                     print(f"[DEBUG] {device} Tunnel1 Children: {children}")
                     profile_applied = f"tunnel protection ipsec profile" in " ".join(children)
@@ -1073,7 +1287,7 @@ class CaseStudyGrader:
                     if not profile_applied:
                         print(f"[WARNING] {device} - Tunnel protection not correctly configured.")
                         comments.append(f"{device} Missing tunnel protection for IPSec profile")
-                        grade -= 1.0
+                        grade -= 0.5
 
             except Exception as e:
                 print(f"[ERROR] {device}: Failed to parse configuration - {e}")
@@ -1090,7 +1304,7 @@ class CaseStudyGrader:
         Excludes EIGRP checks for TOR-D1 and TOR-D2, validating only static routes for these devices.
         """
         comments = []
-        grade = 15.0  # Total points for Task 7
+        grade = 18.0  # Total points for Task 7
 
         # Devices restricted to Toronto, ISP, Ottawa, Oshawa, TOR-D1, and TOR-D2
         valid_devices = ["Toronto", "ISP", "Ottawa", "Oshawa", "TOR-D1", "TOR-D2"]
@@ -1111,11 +1325,23 @@ class CaseStudyGrader:
         }
 
         # Required network prefixes
-        required_prefixes = {
-            "Toronto": ["1.1.1.1", "10.1.xx.0", "10.202.10.0", "172.16.xx.0"],
-            "ISP": ["2.2.2.2", "10.202.10.0", "10.202.20.0"],
-            "Ottawa": ["3.3.3.3", "10.1.xx.0", "10.202.20.0", "172.16.84.0", "172.16.85.0", "172.16.86.0"],
-            "Oshawa": ["4.4.4.4", "10.1.xx.0", "172.16.87.0", "172.16.88.0", "172.16.89.0"]
+        tunnel_prefixes = {
+            "Toronto": ["10.1.xx.0"],
+            "Ottawa": ["10.1.xx.0"],
+            "Oshawa": ["10.1.xx.0"]
+        }
+
+        mpls_prefixes = {
+            "Toronto": ["10.202.10.0"],
+            "ISP": ["10.202.10.0", "10.202.20.0"],
+            "Ottawa": ["10.202.20.0"],
+        }
+
+        loopback_prefixes = {
+            "Toronto": ["1.1.1.1"],
+            "ISP": ["2.2.2.2"],
+            "Ottawa": ["3.3.3.3", "172.16.84.0", "172.16.85.0", "172.16.86.0"],
+            "Oshawa": ["4.4.4.4", "172.16.87.0", "172.16.88.0", "172.16.89.0"]
         }
 
         # Static routes for TOR-D1 and TOR-D2
@@ -1152,8 +1378,8 @@ class CaseStudyGrader:
                 print(f"[DEBUG] {device} EIGRP Process Detected: {eigrp_obj}")
                 if not eigrp_obj:
                     print(f"[WARNING] {device} - EIGRP process {eigrp_process_name} not found.")
-                    comments.append(f"{device} Missing EIGRP process")
-                    grade -= 2.0
+                    comments.append(f"{device} Missing or incorrect EIGRP process")
+                    grade -= 0.5
                 else:
                     # Address Family Validation
                     address_family_obj = eigrp_obj[0].re_search_children(rf"^ address-family ipv4 unicast autonomous-system {group_number}")
@@ -1161,32 +1387,61 @@ class CaseStudyGrader:
                     if not address_family_obj:
                         print(f"[WARNING] {device} - EIGRP address-family for AS {group_number} not found.")
                         comments.append(f"{device} Missing EIGRP address-family configuration")
-                        grade -= 5.0
+                        grade -= 1.0
                     else:
                         # Parse all children of address-family ipv4
                         address_family_children = [child.text.strip() for child in address_family_obj[0].children]
                         print(f"[DEBUG] {device} Address Family Children: {address_family_children}")
 
                         # Network Prefix Validation
-                        required_networks = required_prefixes[device]
-                        for prefix in required_networks:
-                            if prefix.replace("xx", str(group_number)) not in [child.split()[1] for child in address_family_children if child.startswith("network")]:
-                                print(f"[WARNING] {device} - Missing network command for prefix {prefix.replace('xx', str(group_number))}.")
-                                comments.append(f"{device} Missing network command for prefix {prefix.replace('xx', str(group_number))}")
-                                grade -= 1.0
+                        # check if toronto, ottawa, oshawa have network command for tunnel prefixes
+                        if device in ["Toronto", "Ottawa", "Oshawa"]:
+                            print(f"[INFO] Validating tunnel prefixes for {device}...")
+                            for prefix in tunnel_prefixes[device]:
+                                # Replace 'xx' with the group number in the prefix
+                                formatted_prefix = prefix.replace("xx", str(group_number))
+                                
+                                # Regex to match the "network <prefix>" part, ignoring any masks
+                                regex = rf"^network\s+{re.escape(formatted_prefix)}"
+                                if not any(re.match(regex, line) for line in address_family_children):
+                                    print(f"[WARNING] {device} - Missing network command for prefix {formatted_prefix}.")
+                                    comments.append(f"{device} Missing network command for prefix {formatted_prefix}")
+                                    grade -= 1.0
+
+                        # check if toronto, isp, ottawa have network command for mpls prefixes
+                        if device in ["Toronto", "ISP", "Ottawa"]:
+                            print(f"[INFO] Validating MPLS prefixes for {device}...")
+                            for prefix in mpls_prefixes[device]:
+                                # Regex to match the "network <prefix>" part, ignoring any masks
+                                regex = rf"^network\s+{re.escape(prefix)}"
+                                if not any(re.match(regex, line) for line in address_family_children):
+                                    print(f"[WARNING] {device} - Missing network command for prefix {prefix}.")
+                                    comments.append(f"{device} Missing network command for prefix {prefix}")
+                                    grade -= 1.0
+
+                        # check if toronto, isp, ottawa, oshawa have network command for loopback prefixes
+                        if device in ["Toronto", "ISP", "Ottawa", "Oshawa"]:
+                            print(f"[INFO] Validating loopback prefixes for {device}...")
+                            for prefix in loopback_prefixes[device]:
+                                # Regex to match the "network <prefix>" part, ignoring any masks
+                                regex = rf"^network\s+{re.escape(prefix)}"
+                                if not any(re.match(regex, line) for line in address_family_children):
+                                    print(f"[WARNING] {device} - Missing network command for prefix {prefix}.")
+                                    comments.append(f"{device} Missing network command for prefix {prefix}")
+                                    grade -= 0.5
 
                         # Forbidden Network Validation
                         forbidden_network = forbidden_networks.get(device, "").replace("xx", str(group_number))
                         if forbidden_network and forbidden_network in [child.split()[1] for child in address_family_children if child.startswith("network")]:
                             print(f"[WARNING] {device} - Forbidden network command found for prefix {forbidden_network}.")
                             comments.append(f"{device} Forbidden network command for prefix {forbidden_network}")
-                            grade -= 2.0
+                            grade -= 1.0
 
                         # Router-ID Validation
                         if f"eigrp router-id {router_ids[device]}" not in address_family_children:
                             print(f"[WARNING] {device} - Router-ID {router_ids[device]} not configured under address-family ipv4.")
                             comments.append(f"{device} Missing Router-ID {router_ids[device]} under address-family ipv4")
-                            grade -= 1.0
+                            grade -= 0.5
 
                     # Static Route Validation for Toronto
                     if device == "Toronto":
@@ -1210,7 +1465,7 @@ class CaseStudyGrader:
         Validates time zone, NTP server configuration, and time synchronization across devices.
         """
         comments = []
-        grade = 8.0  # Total points for Task 8
+        grade = 12.5  # Total points for Task 8
 
         # NTP server IP addresses
         isp_loopback1_ip = "2.2.2.2"  # ISP's Loopback1 IP
@@ -1237,7 +1492,7 @@ class CaseStudyGrader:
                 if not timezone_detected:
                     print(f"[WARNING] {device} - Time zone not correctly configured.")
                     comments.append(f"{device} Missing or incorrect time zone configuration")
-                    grade -= 0.2
+                    grade -= 0.5
                 if not summertime_detected:
                     print(f"[WARNING] {device} - Daylight savings time not correctly configured.")
                     comments.append(f"{device} Missing or incorrect daylight savings time configuration")
@@ -1252,7 +1507,7 @@ class CaseStudyGrader:
                     if not ntp_master_detected:
                         print(f"[WARNING] ISP - NTP master configuration missing or incorrect.")
                         comments.append("ISP Missing or incorrect NTP master configuration")
-                        grade -= 2.0
+                        grade -= 1.0
 
                 # 3. Synchronization for Toronto, Ottawa, Oshawa
                 if device in ntp_synchronize_isp:
